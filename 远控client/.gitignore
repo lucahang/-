@@ -1,0 +1,25 @@
+# 排除 Visual Studio 自动生成的庞大数据库和缓存
+.vs/
+[Bb]in/
+[Oo]bj/
+*.opendb
+*.db
+*.VC.db
+
+# 排除编译生成的执行文件和调试符号
+Debug/
+Release/
+x64/
+x86/
+*.exe
+*.pdb
+*.ilk
+*.log
+
+# 排除你的第三方库（如果你把库放在了项目内，比如 FFmpeg/OpenCV 的 bin）
+# 如果你希望保留 DLL，可以不写下面这行，但通常建议 DLL 也不进 Git
+*.dll
+*.lib
+
+# 排除 Git 产生的临时文件
+*.stackdump

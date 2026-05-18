@@ -1,0 +1,31 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.14.36127.28 d17.14
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "远控", "远控\远控.vcxproj", "{CB067591-3B11-4A55-9DFD-14F0554A8ACD}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|x64 = Debug|x64
+		Debug|x86 = Debug|x86
+		Release|x64 = Release|x64
+		Release|x86 = Release|x86
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{CB067591-3B11-4A55-9DFD-14F0554A8ACD}.Debug|x64.ActiveCfg = Debug|x64
+		{CB067591-3B11-4A55-9DFD-14F0554A8ACD}.Debug|x64.Build.0 = Debug|x64
+		{CB067591-3B11-4A55-9DFD-14F0554A8ACD}.Debug|x86.ActiveCfg = Debug|Win32
+		{CB067591-3B11-4A55-9DFD-14F0554A8ACD}.Debug|x86.Build.0 = Debug|Win32
+		{CB067591-3B11-4A55-9DFD-14F0554A8ACD}.Release|x64.ActiveCfg = Release|x64
+		{CB067591-3B11-4A55-9DFD-14F0554A8ACD}.Release|x64.Build.0 = Release|x64
+		{CB067591-3B11-4A55-9DFD-14F0554A8ACD}.Release|x86.ActiveCfg = Release|Win32
+		{CB067591-3B11-4A55-9DFD-14F0554A8ACD}.Release|x86.Build.0 = Release|Win32
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {9F3B822F-982F-43C2-93FB-C49F35D2C6C4}
+	EndGlobalSection
+EndGlobal

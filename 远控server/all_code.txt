@@ -1,0 +1,906 @@
+
+========================================
+FILE: D:\c++项目\远控\远控\Config.h
+========================================
+
+#pragma once
+
+namespace Config {
+    // 画面设置
+    const int TARGET_FPS = 30;           // 目标帧率
+    const int WAIT_TIMEOUT_MS = 1000 / TARGET_FPS; // 采集等待时间 (约 33ms)
+
+    // 网络设置
+    const int SERVER_PORT = 8808;        // 被控端监听的端口
+}
+
+========================================
+FILE: D:\c++项目\远控\远控\FFmpegUtils.h
+========================================
+
+// FFmpegUtils.h
+#pragma once
+extern "C" {
+#include <libavcodec/avcodec.h>
+#include <libswscale/swscale.h>
+}
+#include <memory>
+
+// 自定义删除器，实现 FFmpeg 资源的 RAII 管理
+struct AVPacketDeleter { void operator()(AVPacket* p) const { av_packet_free(&p); } };
+struct AVFrameDeleter { void operator()(AVFrame* f) const { av_frame_free(&f); } };
+struct AVCodecContextDeleter { void operator()(AVCodecContext* c) const { avcodec_free_context(&c); } };
+struct SwsContextDeleter { void operator()(SwsContext* s) const { sws_freeContext(s); } };
+
+using PacketPtr = std::unique_ptr<AVPacket, AVPacketDeleter>;
+using FramePtr = std::unique_ptr<AVFrame, AVFrameDeleter>;
+using CodecCtxPtr = std::unique_ptr<AVCodecContext, AVCodecContextDeleter>;
+using SwsCtxPtr = std::unique_ptr<SwsContext, SwsContextDeleter>;
+
+========================================
+FILE: D:\c++项目\远控\远控\InputController.cpp
+========================================
+
+#include "InputController.h"
+
+InputController::InputController() {}
+InputController::~InputController() {}
+
+void InputController::MoveMouseTo(int x, int y, int screenWidth, int screenHeight) {
+    INPUT input = { 0 };
+    input.type = INPUT_MOUSE;
+    // Windows API 的鼠标绝对坐标范围是 0 到 65535，所以要做比例映射
+    input.mi.dx = (x * 65535) / screenWidth;
+    input.mi.dy = (y * 65535) / screenHeight;
+    input.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE;
+
+    SendInput(1, &input, sizeof(INPUT)); // 执行移动
+}
+
+void InputController::LeftClickDown() {
+    INPUT inputs[1] = { 0 };
+    // 按下
+    inputs[0].type = INPUT_MOUSE;
+    inputs[0].mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
+
+    SendInput(1, inputs, sizeof(INPUT));
+}
+
+void InputController::LeftClickUp() {
+    INPUT inputs[1] = { 0 };
+    // 抬起
+    inputs[0].type = INPUT_MOUSE;
+    inputs[0].mi.dwFlags = MOUSEEVENTF_LEFTUP;
+    SendInput(1, inputs, sizeof(INPUT));
+}
+
+void InputController::RightClickDown() {
+    INPUT inputs[1] = { 0 };
+    // 按下
+    inputs[0].type = INPUT_MOUSE;
+    inputs[0].mi.dwFlags = MOUSEEVENTF_RIGHTDOWN;
+
+    SendInput(1, inputs, sizeof(INPUT)); // 执行点击
+}
+void InputController::RightClickUp() {
+    INPUT inputs[1] = { 0 };
+    // 抬起
+    inputs[0].type = INPUT_MOUSE;
+    inputs[0].mi.dwFlags = MOUSEEVENTF_RIGHTUP;
+    SendInput(1, inputs, sizeof(INPUT));
+}
+
+void InputController::PressKey(WORD vKey, bool state) {
+    INPUT input = { 0 };
+    input.type = INPUT_KEYBOARD;
+
+    // 1. 获取硬件扫描码 (Scan Code)
+    // 这是模拟物理键盘的核心：将虚拟键码转换为键盘硬件发的原始信号
+    UINT scanCode = MapVirtualKey(vKey, MAPVK_VK_TO_VSC);
+
+    // 2. 配置输入信息
+    input.ki.wVk = vKey;
+    input.ki.wScan = (WORD)scanCode;
+    input.ki.time = 0;
+    input.ki.dwExtraInfo = GetMessageExtraInfo();
+
+    // 3. 核心标志位：必须包含 KEYEVENTF_SCANCODE
+    if (state) {
+        // 【按下状态】
+        // 告诉系统：我不仅有虚拟键，还有硬件扫描码
+        input.ki.dwFlags = KEYEVENTF_SCANCODE;
+    }
+    else {
+        // 【抬起状态】
+        input.ki.dwFlags = KEYEVENTF_SCANCODE | KEYEVENTF_KEYUP;
+    }
+
+    // 4. 处理扩展键 (Extended Keys)
+    // 方向键、Insert、Delete、Home、End、PageUp/Down、右侧的 Alt 和 Ctrl 属于扩展键
+    // 如果不处理这个标志，长按方向键会变成长按小键盘数字
+    if (vKey >= 33 && vKey <= 46 || vKey >= 91 && vKey <= 93) {
+        input.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
+    }
+
+    SendInput(1, &input, sizeof(INPUT));
+}
+
+
+========================================
+FILE: D:\c++项目\远控\远控\InputController.h
+========================================
+
+#pragma once
+#include <windows.h>
+#include <unordered_map>
+class InputController {
+private:
+    std::unordered_map<WORD, int>ump;
+public:
+    InputController();
+    ~InputController();
+
+    // 移动鼠标到绝对坐标 (x, y)
+    void MoveMouseTo(int x, int y, int screenWidth, int screenHeight);
+
+    // 模拟鼠标左键点击
+    void LeftClickDown();
+    void LeftClickUp();
+
+    void RightClickDown();
+    void RightClickUp();
+
+    // 模拟键盘按键 (例如: VK_RETURN 代表回车键)
+
+    void PressKey(WORD vKey, bool state);
+
+};
+
+
+========================================
+FILE: D:\c++项目\远控\远控\main.cpp
+========================================
+
+#include <iostream>
+#include <thread>
+#include <chrono>
+
+// 引入我们所有的模块
+#include "Config.h"
+#include "ScreenCapturer.h"
+#include "VideoEncoder.h"
+#include "NetworkTransmitter.h"
+#include "InputController.h"
+#include "Protocol.h"
+
+int main() {
+    ScreenCapturer capturer;
+    VideoEncoder encoder;
+    NetworkTransmitter network;
+    InputController input;
+
+    if (!capturer.Init()) {
+        std::cout << "屏幕采集初始化失败！" << std::endl;
+        return -1;
+    }
+
+    // 获取屏幕信息
+    CaptureInfo screenInfo;
+    unsigned char* testPixels = nullptr;
+    while (!testPixels) {
+        testPixels = capturer.CaptureNextFrame(screenInfo);
+        if (testPixels) {
+            capturer.ReleaseFrame();
+            break;
+        }
+    }
+
+    encoder.Init(screenInfo.width, screenInfo.height, Config::TARGET_FPS);
+
+    std::cout << "[Server] 初始化完成，等待连接..." << std::endl;
+
+    // ========= 外层循环：支持多次连接 =========
+    while (true) {
+
+        // 等待客户端连接（建议你这个函数内部是 accept）
+        if (!network.StartServer(Config::SERVER_PORT)) {
+            std::cout << "[Server] 启动失败，3秒后重试..." << std::endl;
+            std::this_thread::sleep_for(std::chrono::seconds(3));
+            continue;
+        }
+
+        std::cout << "[Server] 客户端已连接" << std::endl;
+
+        // ========= 内层循环：服务当前连接 =========
+        bool connected = true;
+
+        while (connected) {
+
+            // ====== 1. 采集 + 编码 + 发送 ======
+            CaptureInfo frameInfo;
+            unsigned char* pixels = capturer.CaptureNextFrame(frameInfo);
+
+            if (pixels) {
+                std::vector<unsigned char> packet =
+                    encoder.EncodeFrame(pixels, frameInfo.rowPitch);
+
+                if (!packet.empty()) {
+                    if (!network.SendVideoPacket(packet)) {
+                        std::cout << "[Server] 发送失败，客户端断开" << std::endl;
+                        connected = false;
+                    }
+                }
+
+                capturer.ReleaseFrame();
+            }
+
+            // ====== 2. 处理输入事件 ======
+            ControlEvent cmd;
+
+            while (network.GetNextEvent(cmd)) {
+
+                if (cmd.type == (uint32_t)PacketType::PKT_MOUSE) {
+
+                    if (cmd.eventType == 1)
+                        input.MoveMouseTo(cmd.x, cmd.y, frameInfo.width, frameInfo.height);
+                    else if (cmd.eventType == 2)
+                        input.LeftClickDown();
+                    else if (cmd.eventType == 3)
+                        input.LeftClickUp();
+                    else if (cmd.eventType == 4)
+                        input.RightClickDown();
+                    else if (cmd.eventType == 5)
+                        input.RightClickUp();
+
+                }
+                else if (cmd.type == (uint32_t)PacketType::PKT_KEYBOARD) {
+
+                    input.PressKey(cmd.key, cmd.eventType);
+
+                }
+            }
+
+            // ====== 3. 检测连接状态（关键） ======
+            if (!network.IsConnected()) {
+                std::cout << "[Server] 检测到连接断开" << std::endl;
+                connected = false;
+            }
+
+            // 控制帧率（避免100% CPU）
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+
+        // ========= 连接断开后的清理 =========
+        std::cout << "[Server] 客户端已断开，等待重连..." << std::endl;
+
+        network.CloseConnection(); // 你需要实现这个函数
+
+        std::this_thread::sleep_for(std::chrono::seconds(2));
+    }
+
+    return 0;
+}
+
+========================================
+FILE: D:\c++项目\远控\远控\NetworkTransmitter.cpp
+========================================
+
+#define NOMINMAX
+#include <Windows.h>
+
+#include "NetworkTransmitter.h"
+#include <iostream>
+#include <algorithm>
+
+NetworkTransmitter::NetworkTransmitter()
+    : m_listenSocket(INVALID_SOCKET), m_clientSocket(INVALID_SOCKET), m_udpSocket(INVALID_SOCKET) {
+    WSADATA wsa;
+    WSAStartup(MAKEWORD(2, 2), &wsa);
+}
+
+NetworkTransmitter::~NetworkTransmitter() {
+    CloseConnection();
+    if (m_listenSocket != INVALID_SOCKET) closesocket(m_listenSocket);
+    WSACleanup();
+}
+
+bool NetworkTransmitter::StartServer(int port) {
+    CloseConnection();
+
+    // 1. 初始化 TCP 监听
+    if (m_listenSocket == INVALID_SOCKET) {
+        m_listenSocket = socket(AF_INET, SOCK_STREAM, 0);
+        int opt = 1;
+        setsockopt(m_listenSocket, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
+
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(port);
+        addr.sin_addr.s_addr = INADDR_ANY;
+
+        if (bind(m_listenSocket, (sockaddr*)&addr, sizeof(addr)) == SOCKET_ERROR) return false;
+        if (listen(m_listenSocket, 1) == SOCKET_ERROR) return false;
+    }
+
+    // 2. 【新增】初始化 UDP 监听 (端口为 TCP端口 + 1)
+    if (m_udpSocket == INVALID_SOCKET) {
+        m_udpSocket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+
+        // 设置 UDP 为非阻塞模式，方便稍后探测握手包
+        u_long mode = 1;
+        ioctlsocket(m_udpSocket, FIONBIO, &mode);
+
+        sockaddr_in udpAddr{};
+        udpAddr.sin_family = AF_INET;
+        udpAddr.sin_port = htons(port + 1); // 例如 TCP 8808，UDP 就是 8809
+        udpAddr.sin_addr.s_addr = INADDR_ANY;
+        bind(m_udpSocket, (sockaddr*)&udpAddr, sizeof(udpAddr));
+    }
+
+    std::cout << "[Server] 等待控制端 TCP 连接..." << std::endl;
+    m_clientSocket = accept(m_listenSocket, NULL, NULL);
+    m_udpReady = false; // 重置 UDP 状态
+    return m_clientSocket != INVALID_SOCKET;
+}
+
+// 【新增】检测客户端的 UDP 握手包，获取对方 UDP 的真实 IP 和端口
+void NetworkTransmitter::CheckUdpHandshake() {
+    if (m_udpReady) return;
+
+    char buf[16];
+    sockaddr_in senderAddr{};
+    int senderLen = sizeof(senderAddr);
+
+    // 因为设置了非阻塞，没有数据会立刻返回
+    int r = recvfrom(m_udpSocket, buf, sizeof(buf), 0, (sockaddr*)&senderAddr, &senderLen);
+    if (r >= 4) {
+        uint32_t magic = *(uint32_t*)buf;
+        if (magic == PROTOCOL_MAGIC) {
+            m_clientUdpAddr = senderAddr;
+            m_udpReady = true;
+            std::cout << "[Server] 接收到客户端 UDP 握手，视频推流通道建立！" << std::endl;
+        }
+    }
+}
+
+bool NetworkTransmitter::SendVideoPacket(const std::vector<unsigned char>& h264Data) {
+    if (m_clientSocket == INVALID_SOCKET || h264Data.empty()) return false;
+
+    CheckUdpHandshake();
+    if (!m_udpReady) return true; // 还没握手成功，先不发，等一等
+
+    static uint32_t s_frameId = 0;
+    s_frameId++; // 每一帧一个独立编号
+
+    int totalLen = (int)h264Data.size();
+    int fragCount = (totalLen + UDP_MAX_PAYLOAD - 1) / UDP_MAX_PAYLOAD;
+
+    char buf[UDP_MAX_PAYLOAD + sizeof(UdpFragmentHeader)];
+
+    // 将视频帧切片发送
+    for (int i = 0; i < fragCount; ++i) {
+        int offset = i * UDP_MAX_PAYLOAD;
+        int payloadLen = std::min(UDP_MAX_PAYLOAD, totalLen - offset);
+
+        UdpFragmentHeader header;
+        header.magic = PROTOCOL_MAGIC;
+        header.frameId = s_frameId;
+        header.fragIndex = i;
+        header.fragCount = fragCount;
+        header.payloadLen = payloadLen;
+
+        memcpy(buf, &header, sizeof(header));
+        memcpy(buf + sizeof(header), h264Data.data() + offset, payloadLen);
+
+        sendto(m_udpSocket, buf, sizeof(header) + payloadLen, 0,
+            (sockaddr*)&m_clientUdpAddr, sizeof(m_clientUdpAddr));
+    }
+    return true;
+}
+
+void NetworkTransmitter::CloseConnection() {
+    if (m_clientSocket != INVALID_SOCKET) {
+        closesocket(m_clientSocket);
+        m_clientSocket = INVALID_SOCKET;
+    }
+    m_udpReady = false;
+}
+
+// ... GetNextEvent, IsConnected, ReadExactly, SendAll 保持你原本的 TCP 逻辑不变 ...
+// (只需要确保 TCP 专门负责鼠标和键盘指令)
+
+bool NetworkTransmitter::ReadExactly(char* buf, int len) {
+    int received = 0;
+    while (received < len) {
+        int r = recv(m_clientSocket, buf + received, len - received, 0);
+        if (r <= 0) return false;
+        received += r;
+    }
+    return true;
+}
+
+bool NetworkTransmitter::HasData() {
+    if (m_clientSocket == INVALID_SOCKET) return false;
+
+    fd_set fds;
+    FD_ZERO(&fds);
+    FD_SET(m_clientSocket, &fds);
+
+    timeval tv = { 0, 0 };
+
+    return select(0, &fds, NULL, NULL, &tv) > 0;
+}
+bool NetworkTransmitter::GetNextEvent(ControlEvent& outEvent) {
+    if (!HasData()) return false;
+
+    PacketHeader header{};
+    if (!ReadExactly((char*)&header, sizeof(header))) return false;
+    if (header.magic != PROTOCOL_MAGIC) return false;
+    if (header.length <= 0 || header.length > MAX_PACKET_SIZE) {
+        return false;
+    }
+    // ?? 保存类型
+    outEvent.type = header.type;
+
+    // ?? 统一处理：鼠标 + 键盘都读取
+    if (header.type == (uint32_t)PacketType::PKT_MOUSE ||
+        header.type == (uint32_t)PacketType::PKT_KEYBOARD) {
+
+        if (header.length != sizeof(ControlEvent)) {
+            // 长度异常，丢弃
+            std::vector<char> tmp(header.length);
+            ReadExactly(tmp.data(), header.length);
+            return false;
+        }
+
+        ControlEvent temp;
+if (!ReadExactly((char*)&temp, sizeof(ControlEvent))) return false;
+
+temp.type = header.type;
+outEvent = temp;
+return true;
+    }
+
+    // ?? 其他未知数据 → 丢弃
+    if (header.length > 0 && header.length < MAX_PACKET_SIZE) {
+        std::vector<char> tmp(header.length);
+        ReadExactly(tmp.data(), header.length);
+    }
+
+    return false;
+}
+
+bool NetworkTransmitter::IsConnected() {
+    if (m_clientSocket == INVALID_SOCKET) return false;
+
+    fd_set readfds, exceptfds;
+    FD_ZERO(&readfds);
+    FD_ZERO(&exceptfds);
+
+    FD_SET(m_clientSocket, &readfds);
+    FD_SET(m_clientSocket, &exceptfds);
+
+    timeval tv = { 0, 0 };
+
+    int ret = select(0, &readfds, NULL, &exceptfds, &tv);
+
+    if (ret > 0) {
+        if (FD_ISSET(m_clientSocket, &exceptfds)) return false;
+
+        char buf;
+        int r = recv(m_clientSocket, &buf, 1, MSG_PEEK);
+        if (r == 0) return false;
+    }
+
+    return true;
+}
+
+bool NetworkTransmitter::SendAll(const char* data, int len) {
+    int sent = 0;
+    while (sent < len) {
+        int n = send(m_clientSocket, data + sent, len - sent, 0);
+        if (n <= 0) return false;
+        sent += n;
+    }
+    return true;
+}
+
+========================================
+FILE: D:\c++项目\远控\远控\NetworkTransmitter.h
+========================================
+
+#pragma once
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+
+#include <winsock2.h>
+#include <vector>
+#include "Protocol.h" // 引入你的协议头文件
+
+#pragma comment(lib, "ws2_32.lib")
+
+class NetworkTransmitter {
+public:
+    NetworkTransmitter();
+    ~NetworkTransmitter();
+
+    bool StartServer(int port);
+    bool IsConnected();
+    // 发送视频包（带协议头）
+    bool SendVideoPacket(const std::vector<unsigned char>& h264Data);
+
+    // 检查并提取一条远端指令（非阻塞）
+    bool GetNextEvent(ControlEvent& outEvent);
+    void CloseConnection();
+    bool SendAll(const char* data, int len);
+private:
+    bool HasData(); // 探测是否有数据可读
+    bool ReadExactly(char* buf, int len); // 解决 TCP 粘包/半包的核心函数
+    void CheckUdpHandshake(); // 【新增】检查 UDP 握手
+    
+    SOCKET m_listenSocket;
+    SOCKET m_clientSocket;
+    
+    // 【新增】UDP 相关成员
+    SOCKET m_udpSocket;
+    sockaddr_in m_clientUdpAddr;
+    bool m_udpReady = false;
+};
+
+
+========================================
+FILE: D:\c++项目\远控\远控\Protocol.h
+========================================
+
+#pragma once
+#include <cstdint>
+
+const uint32_t PROTOCOL_MAGIC = 0x52445058;
+const uint32_t MAX_PACKET_SIZE = 5 * 1024 * 1024;
+
+enum class PacketType : uint32_t {
+    PKT_VIDEO = 1,
+    PKT_MOUSE = 2,
+    PKT_KEYBOARD = 3
+};
+
+#pragma pack(push, 1)
+// 原有的 TCP 包头（用于鼠标、键盘等指令）
+struct PacketHeader {
+    uint32_t magic;
+    uint32_t type;
+    uint32_t length;
+};
+
+struct ControlEvent {
+    uint32_t type;
+    uint32_t eventType;
+    int32_t x;
+    int32_t y;
+    uint32_t key;
+};
+
+// 【新增】UDP 视频分片包头
+struct UdpFragmentHeader {
+    uint32_t magic;      // 验证魔数 PROTOCOL_MAGIC
+    uint32_t frameId;    // 帧编号 (防止不同帧的分片拼错)
+    uint16_t fragIndex;  // 当前包是第几个分片
+    uint16_t fragCount;  // 这一帧总共有几个分片
+    uint16_t payloadLen; // 当前包的数据长度
+};
+#pragma pack(pop)
+
+// UDP 安全负载大小 (MTU 通常为 1500，预留 100 字节给 IP/UDP 头，1400 是非常安全的尺寸)
+const int UDP_MAX_PAYLOAD = 1400;
+
+========================================
+FILE: D:\c++项目\远控\远控\SafeQueue.h
+========================================
+
+#pragma once
+#include <queue>
+#include <mutex>
+#include <condition_variable>
+
+template<typename T>
+class SafeQueue {
+    std::queue<T> q;
+    std::mutex m;
+    std::condition_variable cv;
+    size_t capacity;
+public:
+    SafeQueue(size_t cap = 2) : capacity(cap) {} // 极小容量，强制丢弃旧帧保证低延迟
+    void push(T val) {
+        std::lock_guard<std::mutex> lock(m);
+        if (q.size() >= capacity) q.pop();
+        q.push(std::move(val));
+        cv.notify_one();
+    }
+    bool pop(T& val) {
+        std::unique_lock<std::mutex> lock(m);
+        if (cv.wait_for(lock, std::chrono::milliseconds(100), [this] {return !q.empty(); })) {
+            val = std::move(q.front());
+            q.pop();
+            return true;
+        }
+        return false;
+    }
+};
+
+========================================
+FILE: D:\c++项目\远控\远控\ScreenCapturer.cpp
+========================================
+
+#include "ScreenCapturer.h"
+
+#pragma comment(lib, "d3d11.lib")
+#pragma comment(lib, "dxgi.lib")
+
+ScreenCapturer::ScreenCapturer() {}
+ScreenCapturer::~ScreenCapturer() { Cleanup(); }
+
+bool ScreenCapturer::Init() {
+    HRESULT hr = S_OK;
+    IDXGIFactory1* factory = nullptr;
+    CreateDXGIFactory1(__uuidof(IDXGIFactory1), (void**)&factory);
+
+    IDXGIAdapter1* adapter = nullptr;
+    for (UINT i = 0; factory->EnumAdapters1(i, &adapter) !=
+        DXGI_ERROR_NOT_FOUND; ++i) {
+        // 尝试创建设备
+        hr = D3D11CreateDevice(adapter, D3D_DRIVER_TYPE_UNKNOWN, nullptr, 0,
+            nullptr, 0, D3D11_SDK_VERSION, &m_device, nullptr, &m_context);
+        if (FAILED(hr)) { adapter->Release(); continue; }
+
+        // 寻找输出口
+        IDXGIOutput* output = nullptr;
+        if (adapter->EnumOutputs(0, &output) != DXGI_ERROR_NOT_FOUND) {
+            IDXGIOutput1* output1 = nullptr;
+            output->QueryInterface(__uuidof(IDXGIOutput1), (void**)&output1);
+
+            hr = output1->DuplicateOutput(m_device, &m_deskDupl);
+            if (SUCCEEDED(hr)) {
+                DXGI_OUTDUPL_DESC duplDesc;
+                m_deskDupl->GetDesc(&duplDesc);
+
+                // 创建中转纹理 (卸货区)
+                D3D11_TEXTURE2D_DESC stDesc = { 0 };
+                stDesc.Width = duplDesc.ModeDesc.Width;
+                stDesc.Height = duplDesc.ModeDesc.Height;
+                stDesc.MipLevels = 1;
+                stDesc.ArraySize = 1;
+                stDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+                stDesc.SampleDesc.Count = 1;
+                stDesc.Usage = D3D11_USAGE_STAGING;
+                stDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+
+                m_device->CreateTexture2D(&stDesc, nullptr, &m_stagingTex);
+
+                output1->Release();
+                output->Release();
+                adapter->Release();
+                factory->Release();
+                return true;
+            }
+            if (output1) output1->Release();
+            output->Release();
+        }
+        Cleanup(); // 如果这块显卡不行，清理后看下一块
+        adapter->Release();
+    }
+    if (factory) factory->Release();
+    return false;
+}
+
+unsigned char* ScreenCapturer::CaptureNextFrame(CaptureInfo& info) {
+    if (!m_deskDupl) return nullptr;
+
+    IDXGIResource* desktopResource = nullptr;
+    DXGI_OUTDUPL_FRAME_INFO frameInfo;
+
+    // 获取下一帧
+    HRESULT hr = m_deskDupl->AcquireNextFrame(100, &frameInfo, &desktopResource);
+    if (FAILED(hr)) return nullptr;
+
+    m_isFrameAcquired = true;
+
+    ID3D11Texture2D* gpuTex = nullptr;
+    desktopResource->QueryInterface(__uuidof(ID3D11Texture2D), (void**)&gpuTex);
+
+    // 显存 -> 卸货区
+    m_context->CopyResource(m_stagingTex, gpuTex);
+
+    D3D11_MAPPED_SUBRESOURCE mapped;
+    unsigned char* pData = nullptr;
+    if (SUCCEEDED(m_context->Map(m_stagingTex, 0, D3D11_MAP_READ, 0, &mapped))) {
+        D3D11_TEXTURE2D_DESC desc;
+        m_stagingTex->GetDesc(&desc);
+
+        info.width = desc.Width;
+        info.height = desc.Height;
+        info.rowPitch = mapped.RowPitch;
+        pData = (unsigned char*)mapped.pData;
+    }
+
+    gpuTex->Release();
+    desktopResource->Release();
+    return pData;
+}
+
+void ScreenCapturer::ReleaseFrame() {
+    if (m_isFrameAcquired) {
+        m_context->Unmap(m_stagingTex, 0);
+        m_deskDupl->ReleaseFrame();
+        m_isFrameAcquired = false;
+    }
+}
+
+void ScreenCapturer::Cleanup() {
+    if (m_stagingTex) { m_stagingTex->Release(); m_stagingTex = nullptr; }
+    if (m_deskDupl) { m_deskDupl->Release(); m_deskDupl = nullptr; }
+    if (m_context) { m_context->Release(); m_context = nullptr; }
+    if (m_device) { m_device->Release(); m_device = nullptr; }
+}
+
+
+========================================
+FILE: D:\c++项目\远控\远控\ScreenCapturer.h
+========================================
+
+#pragma once
+#pragma once
+#include <d3d11.h>
+#include <dxgi1_2.h>
+#include <iostream>
+
+// 定义一个结构体，方便主程序获取当前屏幕的状态
+struct CaptureInfo {
+    int width;
+    int height;
+    int rowPitch;
+};
+
+class ScreenCapturer {
+public:
+    ScreenCapturer();
+    ~ScreenCapturer();
+
+    // 初始化：自动寻找显卡并建立采集通道
+    bool Init();
+
+    // 获取下一帧：返回指向像素数据的指针
+    // 注意：返回的指针在下一次调用 CaptureNextFrame 或 Unmap 之前有效
+    unsigned char* CaptureNextFrame(CaptureInfo& info);
+
+    // 释放当前帧（必须在处理完像素后调用）
+    void ReleaseFrame();
+
+    // 清理所有资源
+    void Cleanup();
+
+private:
+    ID3D11Device* m_device = nullptr;
+    ID3D11DeviceContext* m_context = nullptr;
+    IDXGIOutputDuplication* m_deskDupl = nullptr;
+    ID3D11Texture2D* m_stagingTex = nullptr;
+
+    bool m_isFrameAcquired = false;
+};
+
+
+========================================
+FILE: D:\c++项目\远控\远控\VideoEncoder.cpp
+========================================
+
+#include "VideoEncoder.h"
+#include <iostream>
+
+#pragma comment(lib, "avcodec.lib")
+#pragma comment(lib, "avutil.lib")
+#pragma comment(lib, "swscale.lib")
+
+VideoEncoder::VideoEncoder() {}
+VideoEncoder::~VideoEncoder() { Cleanup(); }
+
+bool VideoEncoder::Init(int width, int height, int fps) {
+    // 1. 查找 H.264 编码器
+    const AVCodec* codec = avcodec_find_encoder(AV_CODEC_ID_H264);
+    if (!codec) return false;
+
+    m_codecContext = avcodec_alloc_context3(codec);
+    m_codecContext->width = width;
+    m_codecContext->height = height;
+    m_codecContext->time_base = { 1, fps };
+    m_codecContext->framerate = { fps, 1 };
+    m_codecContext->pix_fmt = AV_PIX_FMT_YUV420P; // H.264 通用格式
+    m_codecContext->gop_size = 10;                // 关键帧间隔，远控建议设小一点
+    m_codecContext->max_b_frames = 0;             // 远控必须为 0，否则会有延迟
+    m_codecContext->bit_rate = 1500000;
+    m_codecContext->thread_count = 4;
+    // 预设：ultrafast (最快速度), zerolatency (零延迟)
+    av_opt_set(m_codecContext->priv_data, "preset", "ultrafast", 0);
+    av_opt_set(m_codecContext->priv_data, "tune", "zerolatency", 0);
+
+    if (avcodec_open2(m_codecContext, codec, NULL) < 0) return false;
+
+    // 2. 初始化 YUV 帧容器
+    m_yuvFrame = av_frame_alloc();
+    m_yuvFrame->format = m_codecContext->pix_fmt;
+    m_yuvFrame->width = width;
+    m_yuvFrame->height = height;
+    av_frame_get_buffer(m_yuvFrame, 32);
+
+    // 3. 初始化格式转换器 (BGRA -> YUV420P)
+    m_swsContext = sws_getContext(width, height, AV_PIX_FMT_BGRA,
+        width, height, AV_PIX_FMT_YUV420P,
+        SWS_BICUBIC, NULL, NULL, NULL);
+
+    m_packet = av_packet_alloc();
+    return true;
+}
+
+std::vector<unsigned char> VideoEncoder::EncodeFrame(unsigned char* rawPixels, int rowPitch) {
+    std::vector<unsigned char> result;
+
+    // A. 格式转换：从显卡的原始像素转为 YUV
+    const uint8_t* srcSlice[] = { rawPixels };
+    int srcStride[] = { rowPitch };
+    sws_scale(m_swsContext, srcSlice, srcStride, 0, m_codecContext->height,
+        m_yuvFrame->data, m_yuvFrame->linesize);
+
+    // B. 送入编码器
+    static int pts = 0;
+    m_yuvFrame->pts = pts++;
+    if (avcodec_send_frame(m_codecContext, m_yuvFrame) >= 0) {
+        // C. 接收压缩后的包 (NALU)
+        while (avcodec_receive_packet(m_codecContext, m_packet) >= 0) {
+            result.insert(result.end(), m_packet->data, m_packet->data + m_packet->size);
+            av_packet_unref(m_packet);
+        }
+    }
+    return result;
+}
+
+void VideoEncoder::Cleanup() {
+    if (m_codecContext) avcodec_free_context(&m_codecContext);
+    if (m_yuvFrame) av_frame_free(&m_yuvFrame);
+    if (m_swsContext) sws_freeContext(m_swsContext);
+    if (m_packet) av_packet_free(&m_packet);
+}
+
+========================================
+FILE: D:\c++项目\远控\远控\VideoEncoder.h
+========================================
+
+#pragma once
+#include <vector>
+
+// 引入 FFmpeg 头文件
+extern "C" {
+#include <libavcodec/avcodec.h>
+#include <libavutil/opt.h>
+#include <libavutil/imgutils.h>
+#include <libswscale/swscale.h>
+}
+
+struct DirtyRect {
+    int x1, y1, x2, y2;
+    bool valid = false;
+};
+
+class VideoEncoder {
+public:
+    VideoEncoder();
+    ~VideoEncoder();
+    bool Init(int width, int height, int fps);
+    std::vector<unsigned char> EncodeFrame(unsigned char* rawPixels, int rowPitch);
+    void Cleanup();
+
+private:
+    AVCodecContext* m_codecContext = nullptr;
+    AVFrame* m_yuvFrame = nullptr;
+    SwsContext* m_swsContext = nullptr;
+    AVPacket* m_packet = nullptr;
+    int width, height;
+};
